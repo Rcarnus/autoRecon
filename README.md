@@ -28,6 +28,7 @@ Permet de s'eviter le fastidieux saisie de credentials qui est differente pour c
 
 
 # TODO
+- mettre chaque test dans une fonction qui puisse etre appelée indépendemment
 - Meilleure gestion des options en ligne de commande
 - Option de proxification des outils via un socks
 - Scan du systeme pour retrouver les outils
