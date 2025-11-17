@@ -10,7 +10,7 @@ LDAPDOMAINDUMP="ldapdomaindump"
 #LDAPSCANNER="/opt/outils/windows/ldap-scanner/ldap-scanner.py" #retired
 NETEXEC="netexec"
 SMBMAP="smbmap"
-BLOODHOUND="bloodhound-python"
+BLOODHOUND="/home/user/.local/bin/bloodhound-ce-python"
 #TODO: check that the user has the tools installed or the script can find them
 
 if [ ! -x $(which "$BLOODHOUND")]; then
@@ -212,7 +212,11 @@ Looking for passwords in autologin" | tee -a "$LOGFILE"
 #Get MachineAccountQuota attribute
 echo "
 Get MachineAccountQuota attribute:" | tee -a "$LOGFILE"
-"$NETEXEC" ldap "$DCIP" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" -M maq
+"$NETEXEC" ldap "$DCIP" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" -M maq | tee -a "$LOGFILE" | tee -a "$OUTPUTDIR/maq.out"
 
+#List ADCS servers
+echo "
+Get ADCS servers:" | tee -a "$LOGFILE"
+"$NETEXEC" ldap "$DCIP" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" -M adcs | tee -a "$LOGFILE" | tee -a "$OUTPUTDIR/adcs.out"
 
 exit 0
