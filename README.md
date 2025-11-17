@@ -32,3 +32,18 @@ Permet de s'eviter le fastidieux saisie de credentials qui est differente pour c
 - Meilleure gestion des options en ligne de commande
 - Option de proxification des outils via un socks
 - Scan du systeme pour retrouver les outils
+- Utiliser la liste des domain computers obtenue via AD dans autoADrecon
+
+
+In autoADrecon:
+- netexec smb $SMBHOSTFILE -M ntlm_reflection
+- #check for machine accounts rotation
+https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/domain-member-disable-machine-account-password-changes
+
+In autoNetRecon
+
+- # check for vulnerabilities (where put these?)
+- # Do the DC identification a second time during the scan
+netexec smb ../carto_20251104-12-01/domainControllers.list.ips -M remove-mic
+netexec smb ../carto_20251104-12-01/domainControllers.list.ips -M nopac
+- responder-RunFinger
