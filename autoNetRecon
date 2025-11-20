@@ -1,5 +1,12 @@
 #!/bin/bash
 
+printred(){
+	echo -e "\033[0;31m$1\033[0m"
+}
+printgreen(){
+	echo -e "\033[0;32m$1\033[0m"
+}
+
 printusage(){
 	echo "USAGE:
 	$0 hostfile.list [--discover <IP range|filename>] [--very-fast|--fast|--complete]
@@ -9,6 +16,7 @@ printusage(){
 "
 }
 
+# Check requirements:
 NMAP="nmap"
 NETEXEC="netexec"
 RUNFINGER="/usr/share/responder/tools/RunFinger.py"
@@ -16,36 +24,49 @@ ONESIXTYONE="onesixtyone"
 RDPCHECKSEC="/opt/outils/windows/rdp-check-sec/rdp-sec-check.pl"
 HTTPX="httpx"
 GOWITNESS="gowitness"
+SMBUPTIME="/usr/share/responder/tools/FindSMB2UPTime.py"
 
-#TODO check if executables can be executed
-#if [ ! -f "$AQUATONEBIN" ]; then
-#	echo "Aquatone binary was not found. Check the path and redo."
-#	exit 1
-#fi
-#if [ ! -f "$NMAP" ]; then
-#	echo "Nmap binary was not found. Check the path and redo."
-#	exit 1
-#fi
-#if [ ! -f "$NETEXEC" ]; then
-#	echo "Crackmapexec binary was not found. Check the path and redo."
-#	exit 1
-#fi
-if [ ! -f "$RUNFINGER" ]; then
-	echo "Runfinger binary was not found. Check the path and redo."
-	exit 1
-fi
-#if [ ! -f "$ONESIXTYONE" ]; then
-#	echo "Onesixtyone binary was not found. Check the path and redo."
-#	exit 1
-#fi
+checkbinary(){
+	BINARY="$1"
+	MANDATORY="$2"
+	FOUND=false
+	#echo "Checking for $BINARY"
+	if [ -x "$BINARY" ]; then
+		#echo "binary found at specified path"
+		FOUND=true
+	fi
+	if [ -x "$(which $BINARY)" ]; then
+		#echo "$BINARY found in the path"
+		FOUND=true
+	fi
+	if [ "$FOUND" == true ]; then
+		printgreen "Found: $BINARY"
+	fi
+	if [ "$MANDATORY" != true ] && [ "$FOUND" == false ]; then
+		printred "Not found requirement: $BINARY"
+	fi
+	if [ "$MANDATORY" == true ] && [ "$FOUND" == false ]; then
+		printred "Not found mandatory requirement: $BINARY"
+		exit 1
+	fi
+}
+
+checkreqs(){
+	checkbinary "$NMAP" true
+	checkbinary "$NETEXEC" true
+	checkbinary "$RUNFINGER"
+	checkbinary "$ONESIXTYONE"
+	checkbinary "$RDPCHECKSEC"
+	checkbinary "$HTTPX" true
+	checkbinary "$GOWITNESS" true
+	checkbinary "$SMBUPTIME"
+}
 
 
 #date +"%Y-%m-%d-%Hh-%M" for hours
 DATE=$(date +"%Y%m%d-%H-%M")
 #TODO add option to override the OUTPUTDIR
 HOSTLISTFILE="cartoHosts_${DATE}.list"
-SMBUPTIME="/usr/share/responder/tools/FindSMB2UPTime.py"
-
 discover(){
 	echo "$1"
 	OUTPUTDIR="./carto_${DATE}"
@@ -205,6 +226,9 @@ scan(){
 	echo "removing temporary files"
 	rm "$TESTEDHOSTS"
 }
+
+# Start of Main function:
+checkreqs
 
 if [ "$1" = "--discover" ]; then
 	RANGE="$2"
