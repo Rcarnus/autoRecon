@@ -1,44 +1,56 @@
 #!/bin/bash
 
+printred(){
+        echo -e "\033[0;31m$1\033[0m"
+}
+printgreen(){
+        echo -e "\033[0;32m$1\033[0m"
+}
+
 # Impacket folder for kali linux:
 IMPACKETSCRIPTS="/usr/share/doc/python3-impacket/examples/"
-DROPTHEMICSCANNER="/opt/outils/exploit/cve-2019-1040-scanner/scan.py"
-# Is there anything newer than that ?
-#SMBCRUNCHDIR="/opt/outils/windows/SMBCrunch/"
-#GODDI="/opt/outils/windows/goddi/goddi-linux-amd64"
-LDAPDOMAINDUMP="ldapdomaindump"
-#LDAPSCANNER="/opt/outils/windows/ldap-scanner/ldap-scanner.py" #retired
 NETEXEC="netexec"
 SMBMAP="smbmap"
 BLOODHOUND="/home/user/.local/bin/bloodhound-ce-python"
-#TODO: check that the user has the tools installed or the script can find them
+LDAPDOMAINDUMP="ldapdomaindump"
 
-if [ ! -x $(which "$BLOODHOUND")]; then
-  echo "python-bloodhound not installed or cannot be found in the path"
-  exit 1
-fi
-if [ ! -x $(which "$SMBMAP") ]; then
-  echo "smbmap not installed or cannot be found in the path"
-  exit 1
-fi
-if [ ! -x $(which "$LDAPDOMAINDUMP") ]; then
-  echo "ldapdomaindump not installed or cannot be found in the path"
-  exit 1
-fi
-"$IMPACKETSCRIPTS/GetADUsers.py" &> /dev/null
-result=$?
-if [ $result != 1 ]; then
-  echo "Impacket scripts cannot be found at the specified PATH"
-  echo "Update the variable accordingly"
-  exit 1
-fi
-#python3 "$DROPTHEMICSCANNER" &> /dev/null
-#result=$?
-#if [ $result != 1 ]; then
-#  echo "cve-2019-1040-scanner cannot be found at the specified PATH"
-#  echo "Update the variable accordingly"
-#  exit 1
-#fi
+# Retired tools:
+#DROPTHEMICSCANNER="/opt/outils/exploit/cve-2019-1040-scanner/scan.py"
+#SMBCRUNCHDIR="/opt/outils/windows/SMBCrunch/"
+#GODDI="/opt/outils/windows/goddi/goddi-linux-amd64"
+#LDAPSCANNER="/opt/outils/windows/ldap-scanner/ldap-scanner.py" #retired
+
+checkbinary(){
+        BINARY="$1"
+        MANDATORY="$2"
+        FOUND=false
+        #echo "Checking for $BINARY"
+        if [ -x "$BINARY" ]; then
+                #echo "binary found at specified path"
+                FOUND=true
+        fi
+        if [ -x "$(which $BINARY)" ]; then
+                #echo "$BINARY found in the path"
+                FOUND=true
+        fi
+        if [ "$FOUND" == true ]; then
+                printgreen "Found: $BINARY"
+        fi
+        if [ "$MANDATORY" != true ] && [ "$FOUND" == false ]; then
+                printred "Not found requirement: $BINARY"
+        fi
+        if [ "$MANDATORY" == true ] && [ "$FOUND" == false ]; then
+                printred "Not found mandatory requirement: $BINARY"
+                exit 1
+        fi
+}
+
+checkreqs(){
+	checkbinary "$IMPACKETSCRIPTS/GetADUsers.py"
+	checkbinary "$NETEXEC" true
+	checkbinary "$BLOODHOUND" true
+	checkbinary "$NMAP" true
+}
 
 printusage(){
 	echo "USAGE:
@@ -79,6 +91,10 @@ isValidArgument(){
 	fi
 	return 0
 }
+
+
+# Start of main:
+checkreqs
 
 # A POSIX variable
 OPTIND=1         # Reset in case getopts has been used previously in the shell.
@@ -141,10 +157,6 @@ while getopts ":h?vu:p:d:i:c:x:" opt; do
 			;;
 	esac
 done
-echo "username=$USERNAME"
-echo "password=$PASSWORD"
-echo "domain=$DOMAIN"
-echo "hostfile=$HOSTFILE"
 shift $((OPTIND-1))
 [ "${1:-}" = "--" ] && shift
 
@@ -156,14 +168,10 @@ if [ "$USERNAME" = "" -o "$PASSWORD" == "" -o "$DOMAIN" == "" -o "$HOSTFILE" == 
 	exit 1
 fi
 
-
 DATE=$(date +"%Y%m%d-%H-%M")
 #TODO add option to override the OUTPUTDIR
 OUTPUTDIR="./autoADRecon_${DATE}"
 LOGFILE="$OUTPUTDIR/autoADRecon_${DATE}.log"
-
-
-exit 1
 
 
 if [ "$DCIP" == "" ]; then
