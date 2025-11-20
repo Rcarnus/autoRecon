@@ -48,6 +48,19 @@ printusage(){
 "
 }
 
+printfullusage(){
+	echo "
+$0
+
+	-u <username>		Username to use to authentication with the AD
+	-p <password>		Password of the user to authenticate with
+	-d <domain>		Domain to authenticate with
+	-i <hostfile>		Valid path to a file containing a list of SMB hosts
+	-h			Print this help
+	-v 			Verbose mode
+"
+}
+
 isAccountValid(){
 	DCIP="$1"
 	USERNAME="$2"
@@ -75,38 +88,71 @@ PASSWORD=""
 DOMAIN=""
 HOSTFILE=""
 DCIP=""
-while getopts "h?vupdic:" opt; do
+while getopts ":h?vu:p:d:i:c:x:" opt; do
 	case "$opt" in
-		h|\?)	printusage
+		h)  printfullusage
 			exit 1
 			;;
 		v)  verbose=1
+			echo "Verbose mode activated"
 			;;
 		u)  USERNAME="${OPTARG}"
-			echo $USERNAME
+			if [[ "${OPTARG}" == -* ]]; then
+				echo "Option -u requires a valid argument. Got: ${OPTARG}"
+				printfullusage
+				exit 1
+			fi
 			;;
 		p)  PASSWORD="$OPTARG"
+			if [[ "${OPTARG}" == -* ]]; then
+				echo "Option -p requires a valid argument. Got: ${OPTARG}"
+				printfullusage
+				exit 1
+			fi
 			;;
 		d)  DOMAIN="$OPTARG"
+			if [[ "${OPTARG}" == -* ]]; then
+				echo "Option -d requires a valid argument. Got: ${OPTARG}"
+				printfullusage
+				exit 1
+			fi
 			;;
 		i)  HOSTFILE="$OPTARG"
+			if [[ "${OPTARG}" == -* ]]; then
+				echo "Option -i requires a valid argument. Got: ${OPTARG}"
+				printfullusage
+				exit 1
+			fi
 			;;
 		c)  DCIP="$OPTARG"
+			if [[ "${OPTARG}" == -* ]]; then
+				echo "Option -c requires a valid argument. Got: ${OPTARG}"
+				printfullusage
+				exit 1
+			fi
+			;;
+		x)  PROXY="$OPTARG"
+			;;
+		:)  echo "Option -${OPTARG} requires an argument."
+			exit 1
+			;;
+		?)  echo "Unrecognised Option: -${OPTARG}"
+			exit 1
 			;;
 	esac
 done
+echo "username=$USERNAME"
+echo "password=$PASSWORD"
+echo "domain=$DOMAIN"
+echo "hostfile=$HOSTFILE"
 shift $((OPTIND-1))
 [ "${1:-}" = "--" ] && shift
 
-USERNAME="$1"
-PASSWORD="$2"
-DOMAIN="$3"
-HOSTFILE="$4"
-DCIP="$5"
-
 if [ "$USERNAME" = "" -o "$PASSWORD" == "" -o "$DOMAIN" == "" -o "$HOSTFILE" == "" ]; then
-	echo "Missing arguments"
-	printusage
+	echo "Missing at least one mandatory argument:"
+	echo "		Username, Password, Domain, Hostfile"
+	echo ""
+	printfullusage
 	exit 1
 fi
 
@@ -116,6 +162,8 @@ DATE=$(date +"%Y%m%d-%H-%M")
 OUTPUTDIR="./autoADRecon_${DATE}"
 LOGFILE="$OUTPUTDIR/autoADRecon_${DATE}.log"
 
+
+exit 1
 
 
 if [ "$DCIP" == "" ]; then
