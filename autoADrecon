@@ -48,8 +48,9 @@ checkbinary(){
 checkreqs(){
 	checkbinary "$IMPACKETSCRIPTS/GetADUsers.py"
 	checkbinary "$NETEXEC" true
-	checkbinary "$BLOODHOUND" true
-	checkbinary "$NMAP" true
+	checkbinary "$BLOODHOUND"
+	checkbinary "$SMBMAP" true
+	checkbinary "$LDAPDOMAINDUMP" true
 }
 
 printusage(){
@@ -96,7 +97,7 @@ isValidArgument(){
 # Start of main:
 checkreqs
 
-# A POSIX variable
+# Argument parsing
 OPTIND=1         # Reset in case getopts has been used previously in the shell.
 # Initialize our own variables:
 USERNAME=""
@@ -160,13 +161,21 @@ done
 shift $((OPTIND-1))
 [ "${1:-}" = "--" ] && shift
 
-if [ "$USERNAME" = "" -o "$PASSWORD" == "" -o "$DOMAIN" == "" -o "$HOSTFILE" == "" ]; then
+if [ "$USERNAME" = "" -o "$PASSWORD" == "" -o "$HOSTFILE" == "" ]; then
 	echo "Missing at least one mandatory argument:"
-	echo "		Username, Password, Domain, Hostfile"
+	echo "		Username, Password, Hostfile"
 	echo ""
 	printfullusage
 	exit 1
 fi
+if [ "$DOMAIN" == "" -a "$DCIP" == "" ]; then
+	echo "Neither Domain nor DCIP provided:"
+	echo "		Please provide at least one of them."
+	echo ""
+	printfullusage
+	exit 1
+fi
+# Argument parsing done
 
 DATE=$(date +"%Y%m%d-%H-%M")
 #TODO add option to override the OUTPUTDIR
@@ -175,13 +184,26 @@ LOGFILE="$OUTPUTDIR/autoADRecon_${DATE}.log"
 
 
 if [ "$DCIP" == "" ]; then
+	echo "DC IP not provided, attempting to find it automatically"
 	#if not provided determine automatically the DC IP
 	DCIP=$(host "$DOMAIN" | grep "has address" | cut -d ' ' -f 4 | head -1)
 	if [ "$DCIP" == "" ]; then
-		echo "Can't find the DC automatically, please provide it"
+		printred "Can't find the DC automatically, please provide it"
 		exit 1
 	fi
+	printgreen "Found $DCIP as DCIP, continue?"
 fi
+if [ "$DOMAIN" == "" ]; then
+	echo "Domain not provided attempting to find it automatically"
+	#if not provided determine automatically the Domain by connecting to the DC provided
+	DOMAIN="$($NETEXEC smb $DCIP)" | grep domain: | cut -d '(' -f 3 | cut -d : -f 2 | sed 's/)//'
+	if [ "$DOMAIN" == "" ]; then
+		printred "Can't find the Domain automatically, please provide it"
+		exit 1
+	fi
+	printgreen "Found $DOMAIN as domain, continue?"
+fi
+
 #Test that the account is valid
 if ! isAccountValid "$DCIP" "$USERNAME" "$PASSWORD" "$DOMAIN"; then
 	echo "Can't connect with supplied credentials ($USERNAME) to $DCIP ($DOMAIN)"
