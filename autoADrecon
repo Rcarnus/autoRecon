@@ -1,5 +1,7 @@
 #!/bin/bash
 
+VERBOSE=0
+
 printred(){
         echo -e "\033[0;31m$1\033[0m"
 }
@@ -8,11 +10,13 @@ printgreen(){
 }
 
 # Impacket folder for kali linux:
-IMPACKETSCRIPTS="/usr/share/doc/python3-impacket/examples/"
+IMPACKETSCRIPTS="/usr/share/doc/python3-impacket/examples"
 NETEXEC="netexec"
 SMBMAP="smbmap"
-BLOODHOUND="/home/user/.local/bin/bloodhound-ce-python"
+BLOODHOUND="$HOME/.local/bin/bloodhound-ce-python"
 LDAPDOMAINDUMP="ldapdomaindump"
+
+MODE=audit
 
 # Retired tools:
 #DROPTHEMICSCANNER="/opt/outils/exploit/cve-2019-1040-scanner/scan.py"
@@ -48,7 +52,7 @@ checkbinary(){
 checkreqs(){
 	checkbinary "$IMPACKETSCRIPTS/GetADUsers.py"
 	checkbinary "$NETEXEC" true
-	checkbinary "$BLOODHOUND"
+	checkbinary "$BLOODHOUND" true
 	checkbinary "$SMBMAP" true
 	checkbinary "$LDAPDOMAINDUMP" true
 }
@@ -63,15 +67,41 @@ printusage(){
 
 printfullusage(){
 	echo "
-$0
+$0 (audit|scan)
+	audit         		Prints out commands that will be performed during the scan without executing them
+	scan            	Perform an AD scan with valid user credentials and save the output
 
-	-u <username>		Username to use to authentication with the AD
-	-p <password>		Password of the user to authenticate with
-	-d <domain>		Domain to authenticate with
-	-i <hostfile>		Valid path to a file containing a list of SMB hosts
-	-h			Print this help
-	-v 			Verbose mode
+	-u <username>   	Username to use to authentication with the AD
+	-p <password>   	Password of the user to authenticate with
+	-d <domain>  		(optional) Domain to authenticate with
+	-c <dcip>   		(optional) IP address of a Domain Controller
+	-i <hostfile>		(optional) Valid path to a file containing a list of SMB hosts. If provided, will be combined with the domain computer list.
+	-x <socks-proxy>	Socks proxy server [format: IP:PORT]
+	-v              	Verbose mode
+	-h              	Print this help
 "
+}
+
+printOrExecute(){
+	CMD="$1"
+	MODE="$2"
+	if [ "$MODE" == "audit" ]; then
+		echo "[AUDIT] $CMD"
+	else
+		if [ "$VERBOSE" == 1 ]; then
+			echo "[EXECUTING] $CMD"
+		fi
+		eval "$CMD"
+	fi
+}
+
+logger(){
+	MESSAGE="$1"
+	if [ "$MODE" == "audit" ]; then
+		echo "$MESSAGE"
+	else
+		echo "$MESSAGE" | tee -a "$LOGFILE"
+	fi
 }
 
 isAccountValid(){
@@ -79,7 +109,7 @@ isAccountValid(){
 	USERNAME="$2"
 	PASSWORD="$3"
 	DOMAIN="$4"
-	"$SMBMAP" -H "$DCIP" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" | grep "Status: Authenticated"
+	printOrExecute "$SMBMAP -H \"$DCIP\" -u \"$USERNAME\" -p \"$PASSWORD\" -d \"$DOMAIN\" | grep \"Status: Authenticated\"" "$MODE"
 	return $?
 }
 
@@ -97,21 +127,39 @@ isValidArgument(){
 # Start of main:
 checkreqs
 
+# Identify mode
+if [ "$1" == "audit" ]; then
+	MODE="audit"
+	echo "Audit mode selected, no command will be executed"
+elif [ "$1" == "scan" ]; then
+	MODE="scan"
+	echo "Scan mode selected, commands will be executed"
+else
+	echo "First argument must be either 'audit' or 'scan'"
+	printfullusage
+	exit 1
+fi
+
 # Argument parsing
-OPTIND=1         # Reset in case getopts has been used previously in the shell.
+OPTIND=2         # Position ourselves after the first mandatory argument (mode)
 # Initialize our own variables:
 USERNAME=""
 PASSWORD=""
 DOMAIN=""
 HOSTFILE=""
 DCIP=""
-while getopts ":h?vu:p:d:i:c:x:" opt; do
+SOCKS=0
+while getopts ":h?vxu:p:d:i:c:" opt; do
 	case "$opt" in
 		h)  printfullusage
 			exit 1
 			;;
-		v)  verbose=1
+		v)  VERBOSE=1
 			echo "Verbose mode activated"
+			;;
+		x)  SOCKS=1
+			echo "Socks proxy mode activated
+			Using proxychains4 for all network commands"
 			;;
 		u)  USERNAME="${OPTARG}"
 			if [[ "${OPTARG}" == -* ]]; then
@@ -148,8 +196,6 @@ while getopts ":h?vu:p:d:i:c:x:" opt; do
 				exit 1
 			fi
 			;;
-		x)  PROXY="$OPTARG"
-			;;
 		:)  echo "Option -${OPTARG} requires an argument."
 			exit 1
 			;;
@@ -158,12 +204,21 @@ while getopts ":h?vu:p:d:i:c:x:" opt; do
 			;;
 	esac
 done
+
+logger "\$USERNAME=$USERNAME"
+logger "\$PASSWORD=$PASSWORD"
+logger "\$DOMAIN=$DOMAIN"
+logger "\$HOSTFILE=$HOSTFILE"
+logger "\$DCIP=$DCIP"
+logger "\$SOCKS=$SOCKS"
+echo ""
+
 shift $((OPTIND-1))
 [ "${1:-}" = "--" ] && shift
 
-if [ "$USERNAME" = "" -o "$PASSWORD" == "" -o "$HOSTFILE" == "" ]; then
+if [ "$USERNAME" = "" -o "$PASSWORD" == "" ]; then
 	echo "Missing at least one mandatory argument:"
-	echo "		Username, Password, Hostfile"
+	echo "		Username, Password"
 	echo ""
 	printfullusage
 	exit 1
@@ -182,7 +237,7 @@ DATE=$(date +"%Y%m%d-%H-%M")
 OUTPUTDIR="./autoADRecon_${DATE}"
 LOGFILE="$OUTPUTDIR/autoADRecon_${DATE}.log"
 
-
+# Determine missing parameters
 if [ "$DCIP" == "" ]; then
 	echo "DC IP not provided, attempting to find it automatically"
 	#if not provided determine automatically the DC IP
@@ -204,68 +259,100 @@ if [ "$DOMAIN" == "" ]; then
 	printgreen "Found $DOMAIN as domain, continue?"
 fi
 
-#Test that the account is valid
-if ! isAccountValid "$DCIP" "$USERNAME" "$PASSWORD" "$DOMAIN"; then
-	echo "Can't connect with supplied credentials ($USERNAME) to $DCIP ($DOMAIN)"
+# Test that the account is valid
+logger "Checking if provided credentials are valid on $DCIP for domain $DOMAIN with user $USERNAME:"
+if [ "$MODE" == "audit" ]; then	
+	echo "	Not verifying credentials in audit mode"
+else
+	if ! isAccountValid "$DCIP" "$USERNAME" "$PASSWORD" "$DOMAIN"; then
+		echo "	Can't connect with supplied credentials ($USERNAME) to $DCIP ($DOMAIN)"
 	exit 1
+	fi
 fi
 
-mkdir "$OUTPUTDIR" || exit
+# Create output directory
+if [ "$MODE" != "audit" ]; then
+	mkdir "$OUTPUTDIR" || exit
+fi
+
+if [ "$SOCKS" == 1 ]; then
+	NETEXEC="proxychains4 $NETEXEC"
+	SMBMAP="proxychains4 $SMBMAP"
+	IMPACKETSCRIPTS="proxychains4 $IMPACKETSCRIPTS"
+	LDAPDOMAINDUMP="proxychains4 $LDAPDOMAINDUMP"
+	BLOODHOUND="proxychains4 $BLOODHOUND"
+fi
 
 #Do the GPP check
 #TODO
 
 #List domain Controllers again
-host "$DOMAIN" | grep "has address" | cut -d ' ' -f 4 | tee "$OUTPUTDIR/domainControllers.list"
+logger "
+Domain controllers in the domain $DOMAIN are:"
+printOrExecute "host \"$DOMAIN\" | grep \"has address\" | cut -d ' ' -f 4 | tee \"$OUTPUTDIR/domainControllers.list\"" "$MODE"
 
 #AD recon
-echo "
+logger "
 Fetching Bloodhound data from the AD:"
-mkdir "$OUTPUTDIR/bloodhound" || exit
-cd "$OUTPUTDIR/bloodhound" || exit
-"$BLOODHOUND" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" -c All,LoggedOn --zip | tee -a "../../$LOGFILE"
-cd ../../ || exit
+printOrExecute "
+mkdir \"$OUTPUTDIR/bloodhound\" || exit \
+cd \"$OUTPUTDIR/bloodhound\" || exit \
+\"$BLOODHOUND\" -u \"$USERNAME\" -p \"$PASSWORD\" -d \"$DOMAIN\" -c All,LoggedOn --zip --dns-tcp -ns \"$DCIP\" | tee -a \"../../$LOGFILE\" \
+cd ../../ || exit" "$MODE"
 
-#get the user list
-echo "
-Fetching AD Users List:" | tee -a "$LOGFILE"
-"$IMPACKETSCRIPTS/GetADUsers.py" -all "$DOMAIN/$USERNAME:$PASSWORD" -dc-ip "$DCIP" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/allUsersList.out"
-#
-echo "
-Fetching AD infos:" | tee -a "$LOGFILE"
+logger "
+Fetching AD infos:"
 # Retired
 #"$GODDI" -username "$USERNAME" -password "$PASSWORD" -domain "$DOMAIN" -dc "$DOMAIN" -unsafe 2>&1 | tee -a "$LOGFILE"
 #TODO check result and get the following folder from the output of the tool
 #mv /opt/outils/windows/goddi/csv/ "$OUTPUTDIR/goddi-csv" | tee -a "$LOGFILE"
-"$LDAPDOMAINDUMP" --user "$DOMAIN\\$USERNAME" --password "$PASSWORD" --outdir ldapdomaindump "$DCIP" -o "$OUTPUTDIR" | tee -a "$LOGFILE"
+printOrExecute "\"$LDAPDOMAINDUMP\" --user \"$DOMAIN\\$USERNAME\" --password \"$PASSWORD\" --outdir ldapdomaindump \"$DCIP\" -o \"$OUTPUTDIR\" | tee -a \"$LOGFILE\"" "$MODE"
+
+logger "
+Combining hostfile provided with domain computer list from ldapdomaindump"
+COMBINEDHOSTFILE="$OUTPUTDIR/combined_computers.list"
+cut -f 3 -d ',' "$OUTPUTDIR/ldapdomaindump/domain_computers.grep" | sort -u > "$OUTPUTDIR/ldapdomaindump/domain_computers.grep.list"
+if [ "$HOSTFILE" == "" ]; then
+	printgreen "No hostfile provided, using only domain computer list"
+	cp "$OUTPUTDIR/ldapdomaindump/domain_computers.grep.list" "$COMBINEDHOSTFILE"
+else
+	cat "$HOSTFILE" "$OUTPUTDIR/ldapdomaindump/domain_computers.grep.list" | sort -u > "$COMBINEDHOSTFILE"
+fi
+
+
+# Deprecated: got that from ldapdomaindump
+# get the user list
+#logger "
+#Fetching AD Users List:"
+#printOrExecute "\"$IMPACKETSCRIPTS/GetADUsers.py\" -all \"$DOMAIN/$USERNAME:$PASSWORD\" -dc-ip \"$DCIP\" | tee -a \"$LOGFILE\" | tee \"$OUTPUTDIR/allUsersList.out\"" "$MODE"
 
 #extract UserSPN TGS tickets
-echo "
-Fetching User SPN TGSs:" | tee -a "$LOGFILE"
+logger "
+Fetching User SPN TGSs:"
 #TODO no timeout option supported by impacket :(
-"$IMPACKETSCRIPTS/GetUserSPNs.py"  -request "$DOMAIN/$USERNAME:$PASSWORD" -dc-ip "$DCIP" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/userSPNs.out"
+printOrExecute "\"$IMPACKETSCRIPTS/GetUserSPNs.py\"  -request \"$DOMAIN/$USERNAME:$PASSWORD\" -dc-ip \"$DCIP\" | tee -a \"$LOGFILE\" | tee \"$OUTPUTDIR/userSPNs.out\"" "$MODE"
 #extract TGTs without kerberos pre-auth
-echo "
-Fetching TGTs of users without pre-auth:" | tee -a "$LOGFILE"
-"$IMPACKETSCRIPTS/GetNPUsers.py" "$DOMAIN/$USERNAME:$PASSWORD" -request -dc-ip "$DCIP" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/preAuthUsers.out"
+logger "
+Fetching TGTs of users without pre-auth:"
+printOrExecute "\"$IMPACKETSCRIPTS/GetNPUsers.py\" \"$DOMAIN/$USERNAME:$PASSWORD\" -request -dc-ip \"$DCIP\" | tee -a \"$LOGFILE\" | tee \"$OUTPUTDIR/preAuthUsers.out\"" "$MODE"
 
 
 #Find unpatched systems:
-echo "
-Look for unpatched systems:" | tee -a "$LOGFILE"
-echo "TODO: drop-the-mic"
+logger "
+Look for unpatched systems:"
+logger "TODO: drop-the-mic"
 #python3 "$DROPTHEMICSCANNER" "$DOMAIN/$USERNAME:$PASSWORD@" -target-file "$HOSTFILE" 2>&1 | tee -a "$LOGFILE"  | tee "$OUTPUTDIR/dropthemicVulnerableHosts.out"
 
 #List domain controllers
-echo "
-Look for LDAP signing on domain controllers" | tee -a "$LOGFILE"
+logger "
+Look for LDAP signing on domain controllers"
 #python3 "$LDAPSCANNER" "$DOMAIN/$USERNAME:$PASSWORD@" -target-file "$OUTPUTDIR/domainControllers.list" 2>&1 | tee -a "$LOGFILE"  | tee "$OUTPUTDIR/ldapSigningDCs.out"
-"$NETEXEC" ldap "$OUTPUTDIR/domainControllers.list" -M ldap-checker -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/ldapSigningDCs.out"
+printOrExecute "\"$NETEXEC\" ldap \"$OUTPUTDIR/domainControllers.list\" -M ldap-checker -u \"$USERNAME\" -p \"$PASSWORD\" -d \"$DOMAIN\" | tee -a \"$LOGFILE\" | tee \"$OUTPUTDIR/ldapSigningDCs.out\"" "$MODE"
 
 #list all accessible shares
-echo "
-List all accessible shares" | tee -a "$LOGFILE"
-"$SMBMAP" --host-file "$HOSTFILE" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" | tee -a "$LOGFILE"  | tee "$OUTPUTDIR/smbmapAll.out"
+logger "
+List all accessible shares"
+printOrExecute "\"$SMBMAP\" --host-file \"$HOSTFILE\" -u \"$USERNAME\" -p \"$PASSWORD\" -d \"$DOMAIN\" | tee -a \"$LOGFILE\"  | tee \"$OUTPUTDIR/smbmapAll.out\"" "$MODE"
 #TODO: HOSTFILE is too large and inefficient in large networks. smbhosts file would be better here
 #"$SMBCRUNCHDIR/SMBHunt.pl" -i "$HOSTFILE" -o "$OUTPUTDIR/smbhunt.out" -a "$DOMAIN\\$USERNAME:$PASSWORD" | tee -a "$LOGFILE"
 #list all files in thoses shares
@@ -280,21 +367,20 @@ List all accessible shares" | tee -a "$LOGFILE"
 
 #Search for quick wins
 #First, dig for gpp passwords
-echo "
-Looking for passwords in GPPs" | tee -a "$LOGFILE"
-"$NETEXEC" smb "$DOMAIN" -u "$USERNAME" -p "$PASSWORD" -M gpp_password | tee -a "$LOGFILE" | tee "$OUTPUTDIR/gppScan.out"
-echo "
-Looking for passwords in autologin" | tee -a "$LOGFILE"
-"$NETEXEC" smb "$DOMAIN" -u "$USERNAME" -p "$PASSWORD" -M gpp_autologin | tee -a "$LOGFILE" | tee -a "$OUTPUTDIR/gppScan.out"
-
+logger "
+Looking for passwords in GPPs"
+printOrExecute "\"$NETEXEC\" smb \"$DOMAIN\" -u \"$USERNAME\" -p \"$PASSWORD\" -M gpp_password | tee -a \"$LOGFILE\" | tee \"$OUTPUTDIR/gppScan.out\"" "$MODE"
+logger "
+Looking for passwords in autologin"
+printOrExecute "\"$NETEXEC\" smb \"$DOMAIN\" -u \"$USERNAME\" -p \"$PASSWORD\" -M gpp_autologin | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/gppScan.out\"" "$MODE"
 #Get MachineAccountQuota attribute
-echo "
-Get MachineAccountQuota attribute:" | tee -a "$LOGFILE"
-"$NETEXEC" ldap "$DCIP" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" -M maq | tee -a "$LOGFILE" | tee -a "$OUTPUTDIR/maq.out"
+logger "
+Get MachineAccountQuota attribute:"
+printOrExecute "\"$NETEXEC\" ldap \"$DCIP\" -u \"$USERNAME\" -p \"$PASSWORD\" -d \"$DOMAIN\" -M maq | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/maq.out\"" "$MODE"
 
 #List ADCS servers
-echo "
-Get ADCS servers:" | tee -a "$LOGFILE"
-"$NETEXEC" ldap "$DCIP" -u "$USERNAME" -p "$PASSWORD" -d "$DOMAIN" -M adcs | tee -a "$LOGFILE" | tee -a "$OUTPUTDIR/adcs.out"
+logger "
+Get ADCS servers:"
+printOrExecute "\"$NETEXEC\" ldap \"$DCIP\" -u \"$USERNAME\" -p \"$PASSWORD\" -d \"$DOMAIN\" -M adcs | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/adcs.out\"" "$MODE"
 
 exit 0
