@@ -21,7 +21,7 @@ NMAP="nmap"
 NETEXEC="netexec"
 RUNFINGER="/usr/share/responder/tools/RunFinger.py"
 ONESIXTYONE="onesixtyone"
-RDPCHECKSEC="/opt/outils/windows/rdp-check-sec/rdp-sec-check.pl"
+#RDPCHECKSEC="/opt/outils/windows/rdp-check-sec/rdp-sec-check.pl"
 HTTPX="httpx"
 GOWITNESS="gowitness"
 SMBUPTIME="/usr/share/responder/tools/FindSMB2UPTime.py"
@@ -56,7 +56,7 @@ checkreqs(){
 	checkbinary "$NETEXEC" true
 	checkbinary "$RUNFINGER"
 	checkbinary "$ONESIXTYONE"
-	checkbinary "$RDPCHECKSEC"
+	#checkbinary "$RDPCHECKSEC"
 	checkbinary "$HTTPX" true
 	checkbinary "$GOWITNESS" true
 	checkbinary "$SMBUPTIME"
@@ -115,6 +115,7 @@ HOSTSWEBFILE="hostsWEB.list"
 HOSTSSMBFILE="hostsSMB.list"
 HOSTSFTPFILE="hostsFTP.list"
 HOSTSRDPFILE="hostsRDP.list"
+HOSTSMSSQLFILE="hostsMSSQL.list"
 scan(){
 	OUTPUTDIR="./autoNetRecon_${DATE}"
 	LOGFILE="$OUTPUTDIR/autoNetRecon_${DATE}.log"
@@ -187,13 +188,13 @@ scan(){
 	echo ""
 
 	#scan for snmp
-	echo "carto of SNMP"
+	echo "Carto of SNMP"
 	#TODO: translate hostnames to IP addresses to feed onesixtyone
 	"$ONESIXTYONE" -i "$TESTEDHOSTS" | tee "$OUTPUTDIR/onesixtyone.out" | tee -a "$LOGFILE"
 	echo ""
 
 	#scan for FTP servers
-	echo "carto of FTP"
+	echo "Carto of FTP"
 	# look for anonymous FTP servers and vulnerabilities
 	grep ' 21/open' "$OUTPUTDIR/scanServices.gnmap" | cut -d ' ' -f 2 > "$OUTPUTDIR/$HOSTSFTPFILE"
 	"$NMAP" -sT -p 21 --script=ftp-anon.nse -iL "$OUTPUTDIR/$HOSTSFTPFILE" -oN "$OUTPUTDIR/scanFTP.nmap" -vv | tee -a "$LOGFILE"
@@ -212,14 +213,19 @@ scan(){
 	fi
 	echo ""
 
-	echo "carto of rdp"
+	echo "Carto of rdp"
 	echo "Not checked"
 	RDPSEC="scanRDP.out"
 	#see if nmap script would be a better alternative here
 	grep 3389 "$OUTPUTDIR/scanServices.gnmap" | cut -d ' ' -f 2 | sed -n '1!p' > "$OUTPUTDIR/$HOSTSRDPFILE"
+	# netexec rdp ?
+	"$NETEXEC" rdp "$OUTPUTDIR/$HOSTSRDPFILE" | tee "$OUTPUTDIR/nxc_rdp-scan.out" | tee -a "$LOGFILE"
 	#"$RDPCHECKSEC" --file "$OUTPUTDIR/$HOSTSRDPFILE" --retries 1 --timeout 1 | grep "supports PROTOCOL_SSL" | tee -a "$LOGFILE" | tee "$OUTPUTDIR/$RDPSEC"
 	#grep TRUE "$OUTPUTDIR/$RDPSEC" | cut -d ' ' -f 2 > "$OUTPUTDIR/rdpSSLenabled.list"
 	echo ""
+
+	# MSSQL
+	# TODO make a list, try to authenticate using sa account
 
 	echo "Adding tested hosts to hostlist"
 	cat "$TESTEDHOSTS" >> "$OUTPUTDIR/_hosts.txt"
