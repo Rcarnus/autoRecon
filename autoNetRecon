@@ -228,7 +228,7 @@ scan(){
 	# Take pictures of web interfaces with GoWitness
 	#cat "$OUTPUTDIR/scanServices.xml" | "$AQUATONEBIN" --nmap -out "$OUTPUTDIR/aquatone" --screenshot-timeout 300000 --scan-timeout 4000 | tee -a "$LOGFILE"
 	#"$GOWITNESS" screenshot "$OUTPUTDIR/scanServices.xml" | tee -a "$LOGFILE"
-	"$GOWITNESS" scan file -f "$OUTPUTDIR/scanHTTP.out" --write-db | tee -a "$LOGFILE"
+	"$GOWITNESS" scan file -f "$OUTPUTDIR/scanHTTP.out" --write-db --write-db-uri "sqlite://$OUTPUTDIR/gowitness.sqlite3" | tee -a "$LOGFILE"
 	"$GOWITNESS" report generate | tee -a "$LOGFILE"
 	echo ""
 
