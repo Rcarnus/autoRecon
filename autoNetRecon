@@ -16,6 +16,24 @@ printusage(){
 "
 }
 
+printfullusage(){
+	echo "
+$0 (discover|scan)
+	discover       		Discover hosts in the provided IP range(s) or hostfile(s)
+	scan            	Perform an unauth scan using the provided target(s) or hostfile(s)
+
+	-i <hostfile>		Valid path to a file containing a list of SMB hosts. If provided, will be combined with the domain computer list.
+	-t <target> 	 	Use the specified output directory instead of the automatically computed one
+	-e <exclude-file>	(optional) File containing a list of IPs/ranges to exclude from the scan
+	-d <target-domain>  (optional) Domain to extract info from
+	-c <dcip>   		(optional) IP address of a Domain Controller
+	-v              	Verbose mode
+	-h              	Print this help
+
+This script does not support socks proxy mode.
+"
+}
+
 # Check requirements:
 NMAP="nmap"
 NETEXEC="netexec"
@@ -25,6 +43,12 @@ ONESIXTYONE="onesixtyone"
 HTTPX="httpx"
 GOWITNESS="gowitness"
 SMBUPTIME="/usr/share/responder/tools/FindSMB2UPTime.py"
+
+#date +"%Y-%m-%d-%Hh-%M" for hours
+DATE=$(date +"%Y%m%d-%H-%M")
+#TODO add option to override the OUTPUTDIR
+HOSTLISTFILE="cartoHosts_${DATE}.list"
+LOGFILE=""
 
 checkbinary(){
 	BINARY="$1"
@@ -62,13 +86,32 @@ checkreqs(){
 	checkbinary "$SMBUPTIME"
 }
 
+logger(){
+	MESSAGE="$1"
+	COLOR="$2"
+	if [ "$COLOR" == "red" ]; then
+		MESSAGE="\033[0;31m$MESSAGE\033[0m"
+	elif [ "$COLOR" == "green" ]; then
+		MESSAGE="\033[0;32m$MESSAGE\033[0m"
+	fi
+	if [ "$MODE" == "audit" ]; then
+		echo -e "$MESSAGE"
+	else
+		echo -e "$MESSAGE" | tee -a "$LOGFILE"
+	fi
+}
 
-#date +"%Y-%m-%d-%Hh-%M" for hours
-DATE=$(date +"%Y%m%d-%H-%M")
-#TODO add option to override the OUTPUTDIR
-HOSTLISTFILE="cartoHosts_${DATE}.list"
+
+
 discover(){
 	echo "$1"
+
+	# Determine the local IP addresses and exclude them from the scan
+	LOCALIPS=""
+	LOCALIP=""
+	for LOCALIP in $(ip addr | grep "inet " | cut -d ' ' -f 6 | cut -d '/' -f 1); do LOCALIPS=$LOCALIP,$LOCALIPS; done
+	echo "Local IPs to exclude: $LOCALIPS"
+
 	OUTPUTDIR="./carto_${DATE}"
 	LOGFILE="$OUTPUTDIR/autoNetRecon_${DATE}.log"
 	mkdir "$OUTPUTDIR" || exit 1
@@ -89,11 +132,13 @@ discover(){
 	#Check if IPRANGE is a file
 	if [ -f "$IPRANGE" ]; then
 		echo "Reading IP ranges from file : $IPRANGE"
-		sudo "$NMAP" -sP -PS80,443,445,3389 -iL "$IPRANGE" -oG "$CARTOFILE" -T4
+		#sudo "$NMAP" -sP -PS80,161,443,445,3389 -iL "$IPRANGE" -oG "$CARTOFILE" -T4
+		sudo "$NMAP" -sP -PS80,161,443,445,3389 -iL "$IPRANGE" -oG "$CARTOFILE" -T4 --exclude "$LOCALIPS"
 		
 	else
 		echo "Targeting $IPRANGE"
-		sudo "$NMAP" -sP -PS80,443,445,3389 $IPRANGE -oG "$CARTOFILE" -T4
+		#sudo "$NMAP" -sP -PS80,161,443,445,3389 $IPRANGE -oG "$CARTOFILE" -T4
+		sudo "$NMAP" -sP -PS80,161,443,445,3389 $IPRANGE -oG "$CARTOFILE" -T4 --exclude "$LOCALIPS"
 	fi
 
 	echo "Discovered hosts:"
@@ -236,6 +281,8 @@ scan(){
 # Start of Main function:
 checkreqs
 
+
+
 if [ "$1" = "--discover" ]; then
 	RANGE="$2"
 	echo "Discover mode selected with Ip range: $RANGE"
@@ -244,7 +291,10 @@ else
 	scan "$1" "$2"
 fi
 
-#Gather info using SMB null sessions
-#Option to gather info without hostfile
-#Gather info using Responder but without poisonning (just listen)
+#TODO
+# Provide several hostfiles
+# Provide an exclusion list
+# Gather info using SMB null sessions
+# Option to gather info without hostfile
+# Gather info using Responder but without poisonning (just listen)
 
